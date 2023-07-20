@@ -1,0 +1,297 @@
+Based on the requirements, here are the core classes, functions, and methods that will be necessary:
+
+1. `app.py` (Entrypoint)
+   - `generate_epub`: Function to generate the EPUB book based on user inputs.
+   - `create_epub`: Function to create the EPUB file.
+   - `create_cover_image`: Function to create the cover image for the book.
+   - `generate_cover_prompt`: Function to generate a prompt for the book cover.
+   - `generate_plots`: Function to generate fantasy novel plots.
+   - `select_most_engaging`: Function to select the most engaging plot from a list.
+   - `improve_plot`: Function to improve and refine a story plot.
+   - `get_title`: Function to generate a title for the book.
+   - `write_first_chapter`: Function to write the first chapter of the book.
+   - `write_chapter`: Function to write subsequent chapters of the book.
+   - `generate_storyline`: Function to generate a detailed storyline for the book.
+   - `write_to_file`: Function to write content to a file.
+
+2. `templates/index.html` (HTML Template)
+   - HTML template for the website.
+
+3. `static/style.css` (CSS File)
+   - CSS file for styling the website.
+
+Now let's proceed with the code implementation.
+
+`app.py`
+```python
+import os
+import base64
+import requests
+from flask import Flask, render_template, request, send_file
+from ebooklib import epub
+import openai
+
+app = Flask(__name__)
+
+openai.api_key = "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"  # Replace with your OpenAI API key
+stability_api_key = "sk-KibMtkB1j7GdjRsSMrPGj6OqzojHILRAZvpOGTvFvVRW62RS"  # Replace with your Stability API key
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if request.method == 'POST':
+        num_chapters = int(request.form['num_chapters'])
+        writing_style = request.form['writing_style']
+        prompt = request.form['prompt']
+
+        novel, title, chapters, chapter_titles = generate_epub(prompt, num_chapters, writing_style)
+        create_epub(title, 'AI', chapters)
+        create_cover_image(str(chapter_titles))
+
+        return render_template('index.html', novel=novel, title=title, download=True)
+    else:
+        return render_template('index.html', download=False)
+
+def generate_epub(prompt, num_chapters, writing_style):
+    plots = generate_plots(prompt)
+    best_plot = select_most_engaging(plots)
+    improved_plot = improve_plot(best_plot)
+    title = get_title(improved_plot)
+    storyline = generate_storyline(improved_plot, num_chapters)
+    chapter_titles = ast.literal_eval(storyline)
+    novel = f"Storyline:\n{storyline}\n\n"
+    first_chapter = write_first_chapter(storyline, chapter_titles[0], writing_style.strip())
+    novel += f"Chapter 1:\n{first_chapter}\n"
+    chapters = [first_chapter]
+
+    for i in range(num_chapters - 1):
+        chapter = write_chapter(novel, storyline, chapter_titles[i+1])
+        novel += f"Chapter {i+2}:\n{chapter}\n"
+        chapters.append(chapter)
+
+    return novel, title, chapters, chapter_titles
+
+def create_epub(title, author, chapters):
+    book = epub.EpubBook()
+    book.set_identifier('id123456')
+    book.set_title(title)
+    book.set_language('en')
+    book.add_author(author)
+
+    for i, chapter in enumerate(chapters):
+        chapter_title = list(chapter.keys())[0]
+        chapter_content = list(chapter.values())[0]
+        chapter_file_name = f'chapter_{i+1}.xhtml'
+        epub_chapter = epub.EpubHtml(title=chapter_title, file_name=chapter_file_name, lang='en')
+        formatted_content = ''.join(f'<p>{paragraph.strip()}</p>' for paragraph in chapter_content.split('\n') if paragraph.strip())
+        epub_chapter.content = f'<h1>{chapter_title}</h1>{formatted_content}'
+        book.add_item(epub_chapter)
+        book.spine.append(epub_chapter)
+
+    book.toc = (epub_chapter,)
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    style = '''
+    @namespace epub "http://www.idpf.org/2007/ops";
+    body {
+        font-family: Cambria, Liberation Serif, serif;
+    }
+    h1 {
+        text-align: left;
+        text-transform: uppercase;
+        font-weight: 200;
+    }
+    '''
+    nav_css = epub.EpubItem(uid="style_nav", file_name="style/nav.css", media_type="text/css", content=style)
+    book.add_item(nav_css)
+    book.spine.insert(0, nav_css)
+    epub.write_epub(f'{title}.epub', book)
+
+def create_cover_image(plot):
+    plot = str(generate_cover_prompt(plot))
+    engine_id = "stable-diffusion-xl-beta-v2-2-2"
+    api_host = os.getenv('API_HOST', 'https://api.stability.ai')
+    api_key = stability_api_key
+
+    if api_key is None:
+        raise Exception("Missing Stability API key.")
+
+    response = requests.post(
+        f"{api_host}/v1/generation/{engine_id}/text-to-image",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        },
+        json={
+            "text_prompts": [
+                {
+                    "text": plot
+                }
+            ],
+            "cfg_scale": 7,
+            "clip_guidance_preset": "FAST_BLUE",
+            "height": 768,
+            "width": 512,
+            "samples": 1,
+            "steps": 30,
+        },
+    )
+
+    if response.status_code != 200:
+        raise Exception("Non-200 response: " + str(response.text))
+
+    data = response.json()
+
+    for i, image in enumerate(data["artifacts"]):
+        with open(f"static/cover.png", "wb") as f:
+            f.write(base64.b64decode(image["base64"]))
+
+def generate_cover_prompt(plot):
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo-16k",
+        messages=[
+            {"role": "system", "content": "You are a creative assistant that writes a spec for the cover art of a book, based on the book's plot."},
+            {"role": "user", "content": f"Plot: {plot}\n\n--\n\nDescribe the cover we should create, based on the plot. This should be two sentences long, maximum."}
+        ]
+    )
+    return response['choices'][0]['message']['content']
+
+def generate_plots(prompt):
+    response = openai.ChatCompletion.create(
+        model="gpt-4-0613",
+        messages=[
+            {"role": "system", "content": "You are a creative assistant that generates engaging fantasy novel plots."},
+            {"role": "user", "content": f"Generate 10 fantasy novel plots based on this prompt: {prompt}"}
+        ]
+    )
+    return response['choices'][0]['message']['content'].split('\n')
+
+def select_most_engaging(plots):
+    response = openai.ChatCompletion.create(
+        model="gpt-4-0613",
+        messages=[
+            {"role": "system", "content": "You are an expert in writing fantastic fantasy novel plots."},
+            {"role": "user", "content": f"Here are a number of possible plots for a new novel: {plots}\n\n--\n\nNow, write the final plot that we will go with. It can be one of these, a mix of the best elements of multiple, or something completely new and better. The most important thing is the plot should be fantastic, unique, and engaging."}
+        ]
+    )
+    return response['choices'][0]['message']['content']
+
+def improve_plot(plot):
+    response = openai.ChatCompletion.create(
+        model="gpt-4-0613",
+        messages=[
+            {"role": "system", "content": "You are an expert in improving and refining story plots."},
+            {"role": "user", "content": f"Improve this plot: {plot}"}
+        ]
+    )
+    return response['choices'][0]['message']['content']
+
+def get_title(plot):
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo-16k",
+        messages=[
+            {"role": "system", "content": "You are an expert writer."},
+            {"role": "user", "content": f"Here is the plot: {plot}\n\nWhat is the title of this book? Just respond with the title, do nothing else."}
+        ]
+    )
+    return response['choices'][0]['message']['content']
+
+def write_first_chapter(plot, first_chapter_title, writing_style):
+    response = openai.ChatCompletion.create(
+        model="gpt-4-0613",
+        messages=[
+            {"role": "system", "content": "You are a world-class fantasy writer."},
+            {"role": "user", "content": f"Here is the high-level plot to follow: {plot}\n\nWrite the first chapter of this novel: `{first_chapter_title}`.\n\nMake it incredibly unique, engaging, and well-written.\n\nHere is a description of the writing style you should use: `{writing_style}`\n\nInclude only the chapter text. There is no need to rewrite the chapter name."}
+        ]
+    )
+    return response['choices'][0]['message']['content']
+
+def write_chapter(previous_chapters, plot, chapter_title):
+    try:
+        i = random.randint(1, 2242)
+        response = openai.ChatCompletion.create(
+            model="gpt-4-0613",
+            messages=[
+                {"role": "system", "content": "You are a world-class fantasy writer."},
+                {"role": "user", "content": f"Plot: {plot}, Previous Chapters: {previous_chapters}\n\n--\n\nWrite the next chapter of this novel, following the plot and taking in the previous chapters as context. Here is the plan for this chapter: {chapter_title}\n\nWrite it beautifully. Include only the chapter text. There is no need to rewrite the chapter name."}
+            ]
+        )
+        return response['choices'][0]['message']['content']
+    except:
+        response = openai.ChatCompletion.create(
+            model="gpt-4-32k-0613",
+            messages=[
+                {"role": "system", "content": "You are a world-class fantasy writer."},
+                {"role": "user", "content": f"Plot: {plot}, Previous Chapters: {previous_chapters}\n\n--\n\nWrite the next chapter of this novel, following the plot and taking in the previous chapters as context. Here is the plan for this chapter: {chapter_title}\n\nWrite it beautifully. Include only the chapter text. There is no need to rewrite the chapter name."}
+            ]
+        )
+        return response['choices'][0]['message']['content']
+
+def generate_storyline(prompt, num_chapters):
+    response = openai.ChatCompletion.create(
+        model="gpt-4-0613",
+        messages=[
+            {"role": "system", "content": "You are a world-class fantasy writer. Your job is to write a detailed storyline, complete with chapters, for a fantasy novel. Don't be flowery -- you want to get the message across in as few words as possible. But those words should contain lots of information."},
+            {"role": "user", "content": f'Write a fantastic storyline with {num_chapters} chapters and high-level details based on this plot: {prompt}.\n\nDo it in this list of dictionaries format [{"Chapter CHAPTER_NUMBER_HERE - CHAPTER_TITLE_GOES_HERE": "CHAPTER_OVERVIEW_AND_DETAILS_GOES_HERE"}, ...]'}
+
+        ]
+    )
+    return response['choices'][0]['message']['content']
+
+def write_to_file(prompt, content):
+    if not os.path.exists('prompts'):
+        os.mkdir('prompts')
+
+    valid_filename = ''.join(c for c in prompt if c.isalnum() or c in (' ', '.', '_')).rstrip()
+    file_path = f'prompts/{valid_filename}.txt'
+
+    with open(file_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+    print(f'Output for prompt "{prompt}" has been written to {file_path}\n')
+
+if __name__ == '__main__':
+    app.run()
+```
+
+`templates/index.html`
+```html
+<!DOCTYPE html>
+<html>
+<head>
+    <title>PageComposer</title>
+    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <h1>Built Book</h1>
+    <form method="POST" action="/">
+        <label for="num_chapters">Number of Chapters:</label>
+        <input type="number" id="num_chapters" name="num_chapters" required><br><br>
+        <label for="writing_style">Writing Style:</label>
+        <input type="text" id="writing_style" name="writing_style" required><br><br>
+        <label for="prompt">Prompt:</label>
+        <input type="text" id="prompt" name="prompt" required><br><br>
+        <input type="submit" value="Generate Book">
+    </form>
+    {% if download %}
+        <a href="{{ url_for('download') }}" download>Download Book</a>
+    {% endif %}
+</body>
+</html>
+```
+
+`static/style.css`
+```css
+body {
+    background-color: white;
+    text-align: center;
+}
+
+h1 {
+    color: #333;
+}
+```
+
+Please note that the code provided assumes that you have installed the necessary dependencies (`Flask`, `ebooklib`, `openai`) and have the required API keys for OpenAI and Stability. Additionally, make sure to create the `prompts` and `static` directories in the same directory as `app.py` to store the generated files.
+
+Let me know if you need any further assistance!
